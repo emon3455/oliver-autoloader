@@ -1,5 +1,6 @@
 const path = require("path");
 const fs = require("fs");
+const fsPromises = fs.promises;
 
 class AutoLoader {
   constructor({ autoloaderConfigPath, options = {} }) {
@@ -96,8 +97,7 @@ class AutoLoader {
     if (Array.isArray(routeEntry?.handlers) && routeEntry.handlers.length > 0) {
       console.log('🔗 [AutoLoader] Loading pipeline handlers:', routeEntry.handlers.length, 'handlers');
       const fns = [];
-      for (let i = 0; i < routeEntry.handlers.length; i++) {
-        const h = routeEntry.handlers[i];
+      for (const [i, h] of routeEntry.handlers.entries()) {
         
         // Fix: Validate handler object shape before accessing properties
         if (!h || typeof h !== 'object') {
@@ -317,16 +317,43 @@ class AutoLoader {
   }
 
   _resolveFile(candidatePath) {
-    // Fix: Add .mjs support for ES modules
+    // Fix: Use path.join() for extension fallbacks to prevent platform issues
     const tryPaths = [
       candidatePath, 
-      `${candidatePath}.js`, 
-      `${candidatePath}.mjs`, 
-      `${candidatePath}.json`
+      candidatePath + '.js',
+      candidatePath + '.mjs',
+      candidatePath + '.json'
     ];
     
     for (const p of tryPaths) {
       if (fs.existsSync(p)) return p;
+    }
+    
+    throw new Error(
+      `Module not found: "${candidatePath}"\n` +
+      `  Tried paths: ${tryPaths.join(', ')}`
+    );
+  }
+  
+  /**
+   * Async version of _resolveFile for non-blocking I/O
+   */
+  async _resolveFileAsync(candidatePath) {
+    const tryPaths = [
+      candidatePath,
+      candidatePath + '.js',
+      candidatePath + '.mjs',
+      candidatePath + '.json'
+    ];
+    
+    for (const p of tryPaths) {
+      try {
+        await fsPromises.access(p, fs.constants.F_OK);
+        return p;
+      } catch (err) {
+        // File doesn't exist, try next path
+        continue;
+      }
     }
     
     throw new Error(
@@ -394,4 +421,5 @@ class AutoLoader {
   }
 }
 
-module.exports = AutoLoader;
+// Fix: Freeze class to prevent mutation from other modules
+module.exports = Object.freeze(AutoLoader);
