@@ -188,6 +188,429 @@ This audit identifies critical issues in the AutoLoader class across security, s
 
 ---
 
+## 🔧 **DETAILED SUGGESTED FIXES**
+
+### **1. CRITICAL: Fix Unsafe require() Implementation**
+
+**Current Code (Line ~389):**
+```javascript
+_requireWithTimeout(modulePath) {
+  const mod = require(modulePath); // UNSAFE
+  return mod;
+}
+```
+
+**✅ Suggested Fix:**
+```javascript
+const vm = require('vm');
+const Module = require('module');
+
+_requireWithSandboxing(modulePath) {
+  const allowedModules = ['path', 'fs', 'util', 'crypto'];
+  const sandbox = {
+    require: (id) => {
+      if (!allowedModules.includes(id)) {
+        throw new Error(`Module "${id}" not in sandbox allowlist`);
+      }
+      return require(id);
+    },
+    module: {},
+    exports: {}
+  };
+  
+  try {
+    const code = fs.readFileSync(modulePath, 'utf8');
+    vm.createContext(sandbox);
+    vm.runInContext(`(function(require, module, exports) { ${code} })`)(
+      sandbox.require, 
+      sandbox.module, 
+      sandbox.exports
+    );
+    return sandbox.module.exports || sandbox.exports;
+  } catch (error) {
+    throw new Error(`Sandboxed require failed for ${modulePath}: ${error.message}`);
+  }
+}
+```
+
+### **2. HIGH: Remove Console Logging in Production**
+
+**Current Code (Multiple locations):**
+```javascript
+console.log(`✅ [AutoLoader] Single handler loaded: ${fnName}`);
+console.log(`🗑️ [AutoLoader] Evicted LRU cache entry: ${lruPath}`);
+```
+
+**✅ Suggested Fix:**
+```javascript
+// Add logging utility
+const debug = require('debug')('autoloader');
+
+class AutoLoader {
+  constructor(options) {
+    this.logger = options.logger || {
+      debug: debug,
+      info: debug,
+      warn: console.warn,
+      error: console.error
+    };
+    this.isProduction = process.env.NODE_ENV === 'production';
+  }
+  
+  _log(level, message) {
+    if (this.isProduction && level === 'debug') return;
+    this.logger[level](message);
+  }
+  
+  // Replace all console.log with:
+  this._log('debug', `✅ [AutoLoader] Single handler loaded: ${fnName}`);
+  this._log('debug', `🗑️ [AutoLoader] Evicted LRU cache entry: ${lruPath}`);
+}
+```
+
+### **3. HIGH: Fix Ineffective Timeout Mechanism**
+
+**Current Code (Lines 369-392):**
+```javascript
+_requireWithTimeout(modulePath) {
+  const timeout = this.options.moduleLoadTimeout;
+  // setTimeout cannot interrupt synchronous require()
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(new Error(`Timeout exceeded`));
+    }, timeout);
+  });
+  return require(modulePath); // This blocks regardless of timeout
+}
+```
+
+**✅ Suggested Fix:**
+```javascript
+const { Worker, isMainThread, parentPort } = require('worker_threads');
+
+_requireWithTimeout(modulePath) {
+  const timeout = this.options.moduleLoadTimeout;
+  
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(`
+      const { parentPort } = require('worker_threads');
+      try {
+        const mod = require('${modulePath}');
+        parentPort.postMessage({ success: true, module: mod });
+      } catch (error) {
+        parentPort.postMessage({ success: false, error: error.message });
+      }
+    `, { eval: true });
+    
+    const timeoutId = setTimeout(() => {
+      worker.terminate();
+      reject(new Error(`Module load timeout (${timeout}ms) exceeded: ${modulePath}`));
+    }, timeout);
+    
+    worker.on('message', (result) => {
+      clearTimeout(timeoutId);
+      if (result.success) {
+        resolve(result.module);
+      } else {
+        reject(new Error(result.error));
+      }
+    });
+    
+    worker.on('error', (error) => {
+      clearTimeout(timeoutId);
+      reject(error);
+    });
+  });
+}
+```
+
+### **4. HIGH: Strengthen Path Traversal Protection**
+
+**Current Code (Lines 254-271):**
+```javascript
+_validatePathSecurity(absPath) {
+  const relative = path.relative(normalizedBase, normalizedPath);
+  // Can be bypassed with symlinks
+  if (relative && !relative.startsWith('..')) {
+    return true;
+  }
+}
+```
+
+**✅ Suggested Fix:**
+```javascript
+const fs = require('fs');
+
+_validatePathSecurity(absPath) {
+  if (!this.options.strictPathValidation) return true;
+  
+  try {
+    // Resolve symlinks to get real path
+    const realPath = fs.realpathSync(absPath);
+    const normalizedPath = path.normalize(realPath);
+    
+    for (const basePath of this.options.allowedBasePaths) {
+      const realBase = fs.realpathSync(basePath);
+      const normalizedBase = path.normalize(realBase);
+      
+      // Check if the real path is within allowed base
+      if (normalizedPath.startsWith(normalizedBase + path.sep) || 
+          normalizedPath === normalizedBase) {
+        return true;
+      }
+    }
+    
+    throw new Error(
+      `Security violation: Real path "${realPath}" is outside allowed paths`
+    );
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error(`Path does not exist: ${absPath}`);
+    }
+    throw error;
+  }
+}
+```
+
+### **5. HIGH: Fix Race Conditions in Cache Operations**
+
+**Current Code (Lines 228-236):**
+```javascript
+_updateCacheAccess(absPath) {
+  const existingIndex = this.cacheAccessOrder.indexOf(absPath);
+  if (existingIndex > -1) {
+    this.cacheAccessOrder.splice(existingIndex, 1); // Race condition
+  }
+  this.cacheAccessOrder.push(absPath);
+}
+```
+
+**✅ Suggested Fix:**
+```javascript
+class AutoLoader {
+  constructor(options) {
+    // Replace arrays with Map for O(1) operations
+    this.loadedModuleCache = new Map();
+    this.cacheAccessMap = new Map(); // path -> timestamp
+    this.cacheAccessMutex = false;
+  }
+  
+  async _updateCacheAccess(absPath) {
+    // Simple mutex to prevent concurrent access
+    while (this.cacheAccessMutex) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    
+    this.cacheAccessMutex = true;
+    try {
+      this.cacheAccessMap.set(absPath, Date.now());
+    } finally {
+      this.cacheAccessMutex = false;
+    }
+  }
+  
+  _evictLRUCache() {
+    if (this.cacheAccessMap.size === 0) return;
+    
+    // Find oldest entry by timestamp
+    let oldestPath = null;
+    let oldestTime = Date.now();
+    
+    for (const [path, timestamp] of this.cacheAccessMap) {
+      if (timestamp < oldestTime) {
+        oldestTime = timestamp;
+        oldestPath = path;
+      }
+    }
+    
+    if (oldestPath) {
+      this.loadedModuleCache.delete(oldestPath);
+      this.cacheAccessMap.delete(oldestPath);
+      this._log('debug', `🗑️ Evicted LRU cache entry: ${oldestPath}`);
+    }
+  }
+}
+```
+
+### **6. MEDIUM: Add Memory Growth Protection**
+
+**Current Code:**
+```javascript
+// No limits on cache size growth
+this.resolvedPathCache = new Map();
+this.cacheAccessOrder = [];
+```
+
+**✅ Suggested Fix:**
+```javascript
+constructor(options) {
+  this.options = {
+    maxCacheSize: options.maxCacheSize || 1000,
+    maxPathCacheSize: options.maxPathCacheSize || 5000,
+    // ... other options
+  };
+  
+  this.resolvedPathCache = new Map();
+  this.pathCacheAccessTime = new Map();
+}
+
+_addToPathCache(inputPath, resolvedPath) {
+  // Enforce path cache size limit
+  if (this.resolvedPathCache.size >= this.options.maxPathCacheSize) {
+    this._evictOldestPathCache();
+  }
+  
+  this.resolvedPathCache.set(inputPath, resolvedPath);
+  this.pathCacheAccessTime.set(inputPath, Date.now());
+}
+
+_evictOldestPathCache() {
+  let oldestPath = null;
+  let oldestTime = Date.now();
+  
+  for (const [path, timestamp] of this.pathCacheAccessTime) {
+    if (timestamp < oldestTime) {
+      oldestTime = timestamp;
+      oldestPath = path;
+    }
+  }
+  
+  if (oldestPath) {
+    this.resolvedPathCache.delete(oldestPath);
+    this.pathCacheAccessTime.delete(oldestPath);
+  }
+}
+```
+
+### **7. MEDIUM: Fix Deep Clone Circular References**
+
+**Current Code (Lines 395-409):**
+```javascript
+_deepClone(obj) {
+  // No circular reference protection
+  if (obj instanceof Array) return obj.map(item => this._deepClone(item));
+  // ... can cause stack overflow
+}
+```
+
+**✅ Suggested Fix:**
+```javascript
+_deepClone(obj, seen = new WeakSet()) {
+  if (obj === null || typeof obj !== 'object') return obj;
+  
+  // Detect circular references
+  if (seen.has(obj)) {
+    return {}; // or throw error depending on requirements
+  }
+  seen.add(obj);
+  
+  if (obj instanceof Date) return new Date(obj.getTime());
+  if (obj instanceof Array) {
+    return obj.map(item => this._deepClone(item, seen));
+  }
+  if (obj instanceof Map) {
+    return new Map(Array.from(obj, ([k, v]) => [k, this._deepClone(v, seen)]));
+  }
+  if (obj instanceof Set) {
+    return new Set(Array.from(obj, item => this._deepClone(item, seen)));
+  }
+  
+  const clonedObj = {};
+  for (const key in obj) {
+    if (obj.hasOwnProperty(key)) {
+      clonedObj[key] = this._deepClone(obj[key], seen);
+    }
+  }
+  return clonedObj;
+}
+```
+
+### **8. MEDIUM: Replace Synchronous I/O**
+
+**Current Code (Line 316):**
+```javascript
+_resolveFile(candidatePath) {
+  if (fs.existsSync(p)) return p; // Blocks event loop
+}
+```
+
+**✅ Suggested Fix:**
+```javascript
+async _resolveFileAsync(candidatePath) {
+  const tryPaths = [
+    candidatePath,
+    candidatePath + '.js',
+    candidatePath + '.mjs',
+    candidatePath + '.json'
+  ];
+  
+  for (const p of tryPaths) {
+    try {
+      await fsPromises.access(p, fs.constants.F_OK);
+      return p;
+    } catch (err) {
+      continue; // File doesn't exist, try next
+    }
+  }
+  
+  throw new Error(
+    `Module not found: "${candidatePath}"\n` +
+    `Tried paths: ${tryPaths.join(', ')}`
+  );
+}
+
+// Update callers to use async version
+async _requireModuleOnceAsync(relativeOrAbsolutePath) {
+  const absPath = this._safeResolve(relativeOrAbsolutePath);
+  
+  if (this.loadedModuleCache.has(absPath)) {
+    await this._updateCacheAccess(absPath);
+    return this.loadedModuleCache.get(absPath);
+  }
+  
+  const resolvedPath = await this._resolveFileAsync(absPath);
+  const mod = await this._requireWithTimeout(resolvedPath);
+  
+  this.loadedModuleCache.set(absPath, mod);
+  await this._updateCacheAccess(absPath);
+  return mod;
+}
+```
+
+### **9. LOW: Add Named Constants**
+
+**Current Code:**
+```javascript
+maxCacheSize: options.maxCacheSize || 1000,
+maxUtilityCache: options.maxUtilityCache || 100,
+moduleLoadTimeout: options.moduleLoadTimeout || 30000,
+```
+
+**✅ Suggested Fix:**
+```javascript
+// Add constants at top of file
+const DEFAULT_CONFIG = Object.freeze({
+  MAX_CACHE_SIZE: 1000,
+  MAX_UTILITY_CACHE: 100,
+  MODULE_LOAD_TIMEOUT_MS: 30000,
+  MAX_PATH_CACHE_SIZE: 5000,
+  DEFAULT_UTILITIES_DIR: path.resolve(__dirname, "../utils")
+});
+
+constructor({ autoloaderConfigPath, options = {} }) {
+  this.options = {
+    allowedBasePaths: options.allowedBasePaths || [process.cwd()],
+    utilitiesDir: options.utilitiesDir || DEFAULT_CONFIG.DEFAULT_UTILITIES_DIR,
+    maxCacheSize: options.maxCacheSize || DEFAULT_CONFIG.MAX_CACHE_SIZE,
+    maxUtilityCache: options.maxUtilityCache || DEFAULT_CONFIG.MAX_UTILITY_CACHE,
+    moduleLoadTimeout: options.moduleLoadTimeout || DEFAULT_CONFIG.MODULE_LOAD_TIMEOUT_MS,
+    // ... rest of options
+  };
+}
+```
+
+---
+
 ## ❌ **PRODUCTION READINESS: NOT APPROVED**
 
 **Current Status**: Multiple critical issues prevent safe production deployment
