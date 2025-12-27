@@ -102,5 +102,3 @@ Summary Recommendations (prioritized):
 - High: Fix path traversal, race conditions, and interruptible loading (use realpath, mutexes/maps, Worker Threads).
 - Medium: Add cache limits and eviction, migrate to async I/O, add file-existence caching, standardize error handling.
 - Low: Replace magic numbers with constants, reduce object copying in hot paths, add JSDoc and cloning depth limits.
-
-If you'd like, I can (1) tweak category severities, (2) split findings into separate files, or (3) create a `CHANGELOG`/`TODO` from the High/Medium items. Which next? 
