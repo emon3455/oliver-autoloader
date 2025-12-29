@@ -1,6 +1,7 @@
 const path = require("path");
 const fs = require("fs");
 const fsPromises = fs.promises;
+const ErrorHandler = require("./ErrorHandler");
 
 // Default configuration constants
 const DEFAULT_CONFIG = {
@@ -13,7 +14,13 @@ const DEFAULT_CONFIG = {
 
 class AutoLoader {
   constructor({ autoloaderConfigPath, options = {} }) {
-    if (!autoloaderConfigPath) throw new Error("AutoLoader requires autoloaderConfigPath");
+    if (!autoloaderConfigPath) {
+      ErrorHandler.addError("AutoLoader requires autoloaderConfigPath", {
+        code: "MISSING_CONFIG_PATH",
+        origin: "AutoLoader.constructor"
+      });
+      throw new Error("AutoLoader requires autoloaderConfigPath");
+    }
     this.autoloaderConfigPath = autoloaderConfigPath;
 
     // Configuration options with secure defaults
@@ -48,6 +55,10 @@ class AutoLoader {
    */
   init() {
     if (this.isInitialized) {
+      ErrorHandler.addError('AutoLoader already initialized', {
+        code: "ALREADY_INITIALIZED",
+        origin: "AutoLoader.init"
+      });
       throw new Error('AutoLoader already initialized');
     }
 
@@ -56,6 +67,16 @@ class AutoLoader {
     try {
       this.autoloaderConfig = require(resolvedCfgPath);
     } catch (error) {
+      ErrorHandler.addError(`Failed to load autoloader configuration: ${this.autoloaderConfigPath}`, {
+        code: "CONFIG_LOAD_FAILED",
+        origin: "AutoLoader.init",
+        data: {
+          configPath: this.autoloaderConfigPath,
+          resolvedPath: resolvedCfgPath,
+          error: error.message,
+          stack: error.stack
+        }
+      });
       throw new Error(
         `Failed to load autoloader configuration:\n` +
         `  Config path: "${this.autoloaderConfigPath}"\n` +
@@ -68,6 +89,11 @@ class AutoLoader {
     // Validate APP_ROLE requirement
     const hasRoles = this.autoloaderConfig && this.autoloaderConfig.role && typeof this.autoloaderConfig.role === "object";
     if (hasRoles && !process.env.APP_ROLE && !this.options.defaultRole) {
+      ErrorHandler.addError("APP_ROLE environment variable must be defined or options.defaultRole must be set", {
+        code: "MISSING_APP_ROLE",
+        origin: "AutoLoader.init",
+        data: { hasRoles }
+      });
       throw new Error("APP_ROLE environment variable must be defined or options.defaultRole must be set");
     }
 
@@ -77,6 +103,10 @@ class AutoLoader {
 
   loadCoreUtilities() {
     if (!this.isInitialized) {
+      ErrorHandler.addError('AutoLoader must be initialized before loading utilities. Call init() first.', {
+        code: "NOT_INITIALIZED",
+        origin: "AutoLoader.loadCoreUtilities"
+      });
       throw new Error('AutoLoader must be initialized before loading utilities. Call init() first.');
     }
     
@@ -119,7 +149,14 @@ class AutoLoader {
       for (const relPath of routeEntry.requires) {
         console.log(`📦 [AutoLoader] Loading dependency: ${relPath}`);
         const mod = this._requireModuleOnce(relPath);
-        if (!mod) throw new Error(`Failed to require dependency module: ${relPath}`);
+        if (!mod) {
+          ErrorHandler.addError(`Failed to require dependency module: ${relPath}`, {
+            code: "DEPENDENCY_LOAD_FAILED",
+            origin: "AutoLoader.ensureRouteDependencies",
+            data: { relPath }
+          });
+          throw new Error(`Failed to require dependency module: ${relPath}`);
+        }
         console.log(`✅ [AutoLoader] Dependency loaded: ${relPath}`);
       }
     }
@@ -131,12 +168,22 @@ class AutoLoader {
         
         // Fix: Validate handler object shape before accessing properties
         if (!h || typeof h !== 'object') {
+          ErrorHandler.addError(`Handler at index ${i} must be an object, got: ${typeof h}`, {
+            code: "INVALID_HANDLER_TYPE",
+            origin: "AutoLoader.ensureRouteDependencies",
+            data: { handlerIndex: i, handlerType: typeof h }
+          });
           throw new Error(`Handler at index ${i} must be an object, got: ${typeof h}`);
         }
         
         console.log(`🔗 [AutoLoader] Loading handler ${i + 1}/${routeEntry.handlers.length}: ${h.module}::${h.function}`);
         
         if (!h?.module || !h?.function) {
+          ErrorHandler.addError(`Handler at index ${i} must define both 'module' and 'function' properties`, {
+            code: "HANDLER_MISSING_PROPERTIES",
+            origin: "AutoLoader.ensureRouteDependencies",
+            data: { handlerIndex: i, handler: JSON.stringify(h) }
+          });
           throw new Error(`Handler at index ${i} must define both 'module' and 'function' properties. Got: ${JSON.stringify(h)}`);
         }
         
@@ -145,6 +192,17 @@ class AutoLoader {
         
         // Fix: Provide detailed error context when handler function is not found
         if (typeof fn !== "function") {
+          ErrorHandler.addError(`Handler function not found or not a function: ${h.module}::${h.function}`, {
+            code: "HANDLER_FUNCTION_NOT_FOUND",
+            origin: "AutoLoader.ensureRouteDependencies",
+            data: {
+              module: h.module,
+              function: h.function,
+              handlerIndex: i,
+              typeFound: typeof fn,
+              availableExports: Object.keys(m || {})
+            }
+          });
           throw new Error(
             `Handler function not found or not a function:\n` +
             `  Module: "${h.module}"\n` +
@@ -166,6 +224,11 @@ class AutoLoader {
     const fnName = routeEntry?.function;
     const modulePath = routeEntry?.module;
     if (!fnName || !modulePath) {
+      ErrorHandler.addError("Route entry must define `module` + `function` or `handlers[]`", {
+        code: "INVALID_ROUTE_ENTRY",
+        origin: "AutoLoader.ensureRouteDependencies",
+        data: { routeEntry }
+      });
       throw new Error("Route entry must define `module` + `function` or `handlers[]`");
     }
     console.log(`🔗 [AutoLoader] Loading handler: ${modulePath}::${fnName}`);
@@ -174,6 +237,16 @@ class AutoLoader {
     
     // Fix: Provide detailed error context for single handler
     if (typeof handlerFn !== "function") {
+      ErrorHandler.addError(`Handler function not found or not a function: ${modulePath}::${fnName}`, {
+        code: "HANDLER_FUNCTION_NOT_FOUND",
+        origin: "AutoLoader.ensureRouteDependencies",
+        data: {
+          module: modulePath,
+          function: fnName,
+          typeFound: typeof handlerFn,
+          availableExports: Object.keys(handlerModule || {})
+        }
+      });
       throw new Error(
         `Handler function not found or not a function:\n` +
         `  Module: "${modulePath}"\n` +
@@ -201,6 +274,14 @@ class AutoLoader {
     try {
       // Enforce cache size limits
       if (this.loadedUtilityNames.size >= this.options.maxUtilityCache) {
+        ErrorHandler.addError(`Utility cache limit reached (${this.options.maxUtilityCache}). Cannot load more utilities.`, {
+          code: "CACHE_LIMIT_REACHED",
+          origin: "AutoLoader._requireUtilityIntoCache",
+          data: {
+            maxUtilityCache: this.options.maxUtilityCache,
+            currentSize: this.loadedUtilityNames.size
+          }
+        });
         throw new Error(
           `Utility cache limit reached (${this.options.maxUtilityCache}). ` +
           `Cannot load more utilities. Consider increasing maxUtilityCache option.`
@@ -215,6 +296,16 @@ class AutoLoader {
       this.loadedCoreUtilities[utilityName] = require(finalPath);
       this.loadedUtilityNames.add(utilityName);
     } catch (error) {
+      ErrorHandler.addError(`Failed to load utility "${utilityName}"`, {
+        code: "UTILITY_LOAD_FAILED",
+        origin: "AutoLoader._requireUtilityIntoCache",
+        data: {
+          utilityName,
+          utilitiesDir: this.options.utilitiesDir,
+          error: error.message,
+          stack: error.stack
+        }
+      });
       throw new Error(
         `Failed to load utility "${utilityName}":\n` +
         `  Utilities directory: "${this.options.utilitiesDir}"\n` +
@@ -243,6 +334,16 @@ class AutoLoader {
     try {
       mod = this._requireWithTimeout(absPath);
     } catch (error) {
+      ErrorHandler.addError(`Failed to require module: ${relativeOrAbsolutePath}`, {
+        code: "MODULE_REQUIRE_FAILED",
+        origin: "AutoLoader._requireModuleOnce",
+        data: {
+          originalPath: relativeOrAbsolutePath,
+          resolvedPath: absPath,
+          error: error.message,
+          stack: error.stack
+        }
+      });
       throw new Error(
         `Failed to require module:\n` +
         `  Original path: "${relativeOrAbsolutePath}"\n` +
@@ -299,6 +400,14 @@ class AutoLoader {
       }
     }
     
+    ErrorHandler.addError(`Security violation: Path "${absPath}" is not within allowed base paths`, {
+      code: "SECURITY_VIOLATION",
+      origin: "AutoLoader._validatePathSecurity",
+      data: {
+        path: absPath,
+        allowedPaths: allowedPaths
+      }
+    });
     throw new Error(
       `Security violation: Path "${absPath}" is not within allowed base paths:\n` +
       `  Allowed paths: ${allowedPaths.join(', ')}\n` +
@@ -314,11 +423,21 @@ class AutoLoader {
     
     // Fix: Normalize and validate paths to prevent path traversal attacks
     if (!inputPath || typeof inputPath !== 'string') {
+      ErrorHandler.addError(`Invalid path provided: ${inputPath}`, {
+        code: "INVALID_PATH",
+        origin: "AutoLoader._safeResolve",
+        data: { inputPath, type: typeof inputPath }
+      });
       throw new Error(`Invalid path provided: ${inputPath}`);
     }
     
     // Prevent null byte injection
     if (inputPath.includes('\0')) {
+      ErrorHandler.addError(`Invalid path (contains null byte): ${inputPath}`, {
+        code: "NULL_BYTE_INJECTION",
+        origin: "AutoLoader._safeResolve",
+        data: { inputPath }
+      });
       throw new Error(`Invalid path (contains null byte): ${inputPath}`);
     }
     
@@ -370,6 +489,14 @@ class AutoLoader {
       }
     }
     
+    ErrorHandler.addError(`Module not found: "${candidatePath}"`, {
+      code: "MODULE_NOT_FOUND",
+      origin: "AutoLoader._resolveFile",
+      data: {
+        candidatePath,
+        triedPaths: tryPaths
+      }
+    });
     throw new Error(
       `Module not found: "${candidatePath}"\n` +
       `  Tried paths: ${tryPaths.join(', ')}`
@@ -403,6 +530,14 @@ class AutoLoader {
       }
     }
     
+    ErrorHandler.addError(`Module not found: "${candidatePath}"`, {
+      code: "MODULE_NOT_FOUND",
+      origin: "AutoLoader._resolveFileAsync",
+      data: {
+        candidatePath,
+        triedPaths: tryPaths
+      }
+    });
     throw new Error(
       `Module not found: "${candidatePath}"\n` +
       `  Tried paths: ${tryPaths.join(', ')}`
@@ -431,6 +566,11 @@ class AutoLoader {
     const timeoutPromise = new Promise((_, reject) => {
       timeoutHandle = setTimeout(() => {
         isTimedOut = true;
+        ErrorHandler.addError(`Module load timeout (${timeout}ms) exceeded for: ${modulePath}`, {
+          code: "MODULE_LOAD_TIMEOUT",
+          origin: "AutoLoader._requireWithTimeout",
+          data: { modulePath, timeout }
+        });
         reject(new Error(
           `Module load timeout (${timeout}ms) exceeded for: ${modulePath}\n` +
           `  Note: Synchronous require() cannot be interrupted.\n` +
@@ -445,6 +585,11 @@ class AutoLoader {
       clearTimeout(timeoutHandle);
       
       if (isTimedOut) {
+        ErrorHandler.addError(`Module load timeout (${timeout}ms) exceeded for: ${modulePath}`, {
+          code: "MODULE_LOAD_TIMEOUT",
+          origin: "AutoLoader._requireWithTimeout",
+          data: { modulePath, timeout }
+        });
         throw new Error(
           `Module load timeout (${timeout}ms) exceeded for: ${modulePath}\n` +
           `  Enable options.useWorkerThreads for forceful termination support.`
@@ -464,6 +609,14 @@ class AutoLoader {
   _deepClone(obj, visited = new WeakSet(), depth = 0) {
     // Finding 12: Check depth limit
     if (depth > this.options.maxCloneDepth) {
+      ErrorHandler.addError(`Clone depth limit exceeded (${this.options.maxCloneDepth}). Possible circular reference or very deep object structure.`, {
+        code: "CLONE_DEPTH_EXCEEDED",
+        origin: "AutoLoader._deepClone",
+        data: {
+          depth,
+          maxCloneDepth: this.options.maxCloneDepth
+        }
+      });
       throw new Error(
         `Clone depth limit exceeded (${this.options.maxCloneDepth}). ` +
         `Possible circular reference or very deep object structure.`
@@ -475,6 +628,10 @@ class AutoLoader {
     
     // Finding 7: Detect circular references
     if (visited.has(obj)) {
+      ErrorHandler.addError('Circular reference detected in object. Cannot deep clone circular structures.', {
+        code: "CIRCULAR_REFERENCE",
+        origin: "AutoLoader._deepClone"
+      });
       throw new Error(
         'Circular reference detected in object. Cannot deep clone circular structures.'
       );
