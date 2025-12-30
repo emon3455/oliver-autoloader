@@ -1,0 +1,48 @@
+{
+  "global": [
+    {
+      "name": "ENVIRONMENT",
+      "type": "enum",
+      "allowed": ["local", "dev", "stage", "prod"],
+      "default": "local",
+      "required": false
+    },
+    {
+      "name": "LOGGING_ENABLED",
+      "type": "boolean",
+      "default": true,
+      "required": false
+    },
+    {
+      "name": "LOGGING_ENABLE_CONSOLE_LOGS",
+      "type": "boolean",
+      "default": true,
+      "required": false
+    },
+    {
+      "name": "LOG_DEBUG_LEVEL",
+      "type": "enum",
+      "allowed": ["trace", "debug", "info"],
+      "default": "debug",
+      "required": false
+    },
+    {
+      "name": "LOG_EFS_ROOT",
+      "type": "string",
+      "default": "/mnt/efs/logs",
+      "required": false
+    },
+    {
+      "name": "LOG_EFS_CRITICAL_ROOT",
+      "type": "string",
+      "default": "/mnt/efs/logs/critical",
+      "required": false
+    },
+    {
+      "name": "LOG_LOCAL_ROOT",
+      "type": "string",
+      "default": "./logs",
+      "required": false
+    }
+  ]
+}

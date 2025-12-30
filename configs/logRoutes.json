@@ -1,0 +1,15 @@
+{
+  "root": "./logs",
+  "criticalRoot": "./logs/critical",
+  "logs": [
+    {
+      "flag": "AUTOLOADER",
+      "path": "autoloader/{action}/{eventDate:DD-MM-YYYY}.log",
+      "PciCompliance": false,
+      "critical": false,
+      "description": "AutoLoader module loading and initialization events",
+      "category": "system",
+      "retention": 30
+    }
+  ]
+}
