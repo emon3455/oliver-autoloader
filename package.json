@@ -13,9 +13,6 @@
   "devDependencies": {
     "jest": "^30.1.3"
   },
-  "jest": {
-    "setupFiles": ["./jest.setup.js"]
-  },
   "dependencies": {
     "luxon": "^3.7.2"
   }
